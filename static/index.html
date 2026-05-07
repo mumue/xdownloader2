@@ -1,0 +1,402 @@
+﻿<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Batch Downloader - Auto MP4</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css">
+</head>
+<body class="bg-gray-950 text-white min-h-screen">
+  <div class="max-w-5xl mx-auto p-6">
+    <h1 class="text-4xl font-bold text-center mb-2">Batch Downloader</h1>
+    <p class="text-center text-red-400 mb-8">Multiple Links - Best MP4 - Auto Download (0KB Fix)</p>
+
+    <div class="bg-gray-900 rounded-3xl p-8">
+      <textarea id="urlsInput" rows="6" class="w-full bg-gray-800 border border-gray-700 rounded-2xl p-6 text-lg focus:outline-none focus:border-red-500 resize-none" placeholder="Paste banyak link xnxx di sini (1 link per baris)"></textarea>
+
+      <button onclick="extractAndAutoDownload()" class="mt-4 w-full bg-red-600 hover:bg-red-700 py-5 rounded-2xl font-bold text-xl flex items-center justify-center gap-3">
+        <i class="fas fa-download"></i> EXTRACT &amp; AUTO DOWNLOAD BEST MP4
+      </button>
+
+      <div id="result" class="mt-10 hidden"></div>
+    </div>
+
+    <div class="bg-gray-900 rounded-3xl p-8 mt-6">
+      <h2 class="text-2xl font-bold mb-2">Google Drive Setup Cepat</h2>
+      <p class="text-gray-300 mb-5">Sekali setting lalu bisa upload file hasil download ke Drive langsung dari browser (lebih ringan untuk Vercel).</p>
+
+      <div class="grid md:grid-cols-2 gap-4">
+        <div>
+          <label class="text-sm text-gray-400 block mb-1">Google OAuth Client ID</label>
+          <input id="googleClientId" type="text" class="w-full bg-gray-800 border border-gray-700 rounded-xl p-3" placeholder="xxxxxxxx.apps.googleusercontent.com">
+        </div>
+        <div>
+          <label class="text-sm text-gray-400 block mb-1">Drive Folder ID (opsional)</label>
+          <input id="googleDriveFolderId" type="text" class="w-full bg-gray-800 border border-gray-700 rounded-xl p-3" placeholder="Kosongkan untuk My Drive root">
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-3 gap-3 mt-4">
+        <button onclick="saveDriveSettings()" class="bg-blue-600 hover:bg-blue-700 py-3 rounded-xl font-semibold">Simpan Setting</button>
+        <button onclick="connectGoogleDrive()" class="bg-green-600 hover:bg-green-700 py-3 rounded-xl font-semibold">Connect Google</button>
+        <button onclick="uploadSelectedFilesToDrive()" class="bg-amber-600 hover:bg-amber-700 py-3 rounded-xl font-semibold">Upload ke Drive</button>
+      </div>
+
+      <div class="mt-4">
+        <label class="text-sm text-gray-400 block mb-2">Pilih file dari perangkat</label>
+        <input id="driveFilesInput" type="file" multiple class="w-full bg-gray-800 border border-gray-700 rounded-xl p-3">
+      </div>
+
+      <div id="driveStatus" class="mt-4 text-sm text-gray-300 bg-gray-800 border border-gray-700 rounded-xl p-4">Status: belum terkoneksi</div>
+      <div id="driveLog" class="mt-3 text-sm text-gray-200 bg-gray-800 border border-gray-700 rounded-xl p-4 max-h-56 overflow-auto"></div>
+    </div>
+  </div>
+
+  <script>
+    let downloadQueue = [];
+    const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+    const DRIVE_CLIENT_ID_KEY = 'xdownloader_google_client_id';
+    const DRIVE_FOLDER_ID_KEY = 'xdownloader_google_drive_folder_id';
+
+    const driveState = {
+      tokenClient: null,
+      accessToken: null,
+      clientId: null,
+      pendingResolver: null,
+      pendingRejecter: null
+    };
+
+    function escapeHtml(str) {
+      return String(str)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    }
+
+    function appendDriveLog(message, isError = false) {
+      const log = document.getElementById('driveLog');
+      const row = document.createElement('div');
+      row.className = isError ? 'text-red-400 mb-1' : 'text-gray-200 mb-1';
+      row.innerHTML = `${new Date().toLocaleTimeString()} - ${escapeHtml(message)}`;
+      log.appendChild(row);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function setDriveStatus(text, error = false) {
+      const status = document.getElementById('driveStatus');
+      status.textContent = `Status: ${text}`;
+      status.className = error
+        ? 'mt-4 text-sm text-red-300 bg-red-950/40 border border-red-700 rounded-xl p-4'
+        : 'mt-4 text-sm text-gray-300 bg-gray-800 border border-gray-700 rounded-xl p-4';
+    }
+
+    function buildDownloadUrl(video) {
+      const params = new URLSearchParams({
+        url: video.best_format.url,
+        title: video.title,
+        referer: video.referer
+      });
+      return `/download?${params.toString()}`;
+    }
+
+    function startBrowserDownload(video) {
+      const link = document.createElement('a');
+      link.href = buildDownloadUrl(video);
+      link.download = `${video.title}.mp4`;
+      link.rel = 'noopener';
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }
+
+    async function extractAndAutoDownload() {
+      const text = document.getElementById('urlsInput').value.trim();
+      if (!text) return alert('Paste link dulu bro!');
+
+      const urls = text.split('\n').filter(u => u.trim());
+      const resultDiv = document.getElementById('result');
+      resultDiv.classList.remove('hidden');
+      resultDiv.innerHTML = `<p class="text-center py-12"><i class="fas fa-spinner fa-spin text-4xl"></i><br>Sedang mengambil best MP4...</p>`;
+
+      let res;
+      let data;
+
+      try {
+        res = await fetch('/extract', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({urls})
+        });
+        data = await res.json();
+      } catch (error) {
+        resultDiv.innerHTML = `<div class="bg-red-900/40 border border-red-500 rounded-2xl p-4">Gagal konek ke server extract.</div>`;
+        return;
+      }
+
+      if (!res.ok) {
+        resultDiv.innerHTML = `<div class="bg-red-900/40 border border-red-500 rounded-2xl p-4">${data?.error || 'Extract gagal.'}</div>`;
+        return;
+      }
+
+      if (!Array.isArray(data.videos) || data.videos.length === 0) {
+        resultDiv.innerHTML = `<div class="bg-yellow-900/40 border border-yellow-500 rounded-2xl p-4">Tidak ada video MP4 valid ditemukan.</div>`;
+        return;
+      }
+
+      const failedCount = Array.isArray(data.failed) ? data.failed.length : 0;
+      let html = `<h2 class="text-2xl mb-4">Ditemukan ${data.videos.length} video${failedCount ? ` (gagal: ${failedCount})` : ''} - Memulai download...</h2>`;
+
+      data.videos.forEach((v, i) => {
+        html += `
+          <div class="bg-gray-800 rounded-2xl p-5 mb-4 flex gap-4 items-center" id="video-${i}">
+            <img src="${v.thumbnail || ''}" class="w-24 h-16 object-cover rounded-xl" alt="thumb">
+            <div class="flex-1">
+              <p class="font-semibold">${v.title}</p>
+              <p class="text-red-400">${v.best_format.quality} MP4</p>
+              <div class="mt-3 h-2 bg-gray-700 rounded-full overflow-hidden">
+                <div id="progress-${i}" class="h-2 bg-green-500 w-0 transition-all"></div>
+              </div>
+            </div>
+            <span id="status-${i}" class="text-sm text-gray-400">Menunggu...</span>
+          </div>`;
+      });
+
+      resultDiv.innerHTML = html;
+      downloadQueue = data.videos;
+      await autoDownloadAll();
+    }
+
+    async function autoDownloadAll() {
+      for (let i = 0; i < downloadQueue.length; i++) {
+        const v = downloadQueue[i];
+        document.getElementById(`status-${i}`).textContent = 'Memulai download...';
+        updateProgress(i, 30);
+
+        try {
+          startBrowserDownload(v);
+          updateProgress(i, 100);
+          document.getElementById(`status-${i}`).innerHTML = `<span class="text-green-400">Download dimulai</span>`;
+        } catch (e) {
+          document.getElementById(`status-${i}`).innerHTML = `<span class="text-red-400">Gagal memulai</span>`;
+        }
+
+        if (i < downloadQueue.length - 1) {
+          await new Promise(r => setTimeout(r, 1800));
+        }
+      }
+
+      alert('Semua download sudah dipicu. Cek folder Downloads browser.');
+    }
+
+    function updateProgress(index, percent) {
+      const bar = document.getElementById(`progress-${index}`);
+      if (bar) bar.style.width = `${percent}%`;
+    }
+
+    function getDriveSettings() {
+      return {
+        clientId: document.getElementById('googleClientId').value.trim(),
+        folderId: document.getElementById('googleDriveFolderId').value.trim()
+      };
+    }
+
+    async function loadDriveDefaultsFromServer() {
+      try {
+        const res = await fetch('/drive-config');
+        if (!res.ok) return;
+        const cfg = await res.json();
+
+        const currentClient = document.getElementById('googleClientId').value.trim();
+        const currentFolder = document.getElementById('googleDriveFolderId').value.trim();
+
+        if (!currentClient && cfg.google_client_id) {
+          document.getElementById('googleClientId').value = cfg.google_client_id;
+        }
+        if (!currentFolder && cfg.google_drive_folder_id) {
+          document.getElementById('googleDriveFolderId').value = cfg.google_drive_folder_id;
+        }
+      } catch (_) {
+        appendDriveLog('Gagal ambil default config dari server. Lanjut pakai config lokal.', true);
+      }
+    }
+
+    async function initDriveSettings() {
+      const savedClientId = localStorage.getItem(DRIVE_CLIENT_ID_KEY) || '';
+      const savedFolderId = localStorage.getItem(DRIVE_FOLDER_ID_KEY) || '';
+
+      document.getElementById('googleClientId').value = savedClientId;
+      document.getElementById('googleDriveFolderId').value = savedFolderId;
+
+      await loadDriveDefaultsFromServer();
+      setDriveStatus('belum terkoneksi');
+    }
+
+    function saveDriveSettings() {
+      const { clientId, folderId } = getDriveSettings();
+      localStorage.setItem(DRIVE_CLIENT_ID_KEY, clientId);
+      localStorage.setItem(DRIVE_FOLDER_ID_KEY, folderId);
+      appendDriveLog('Setting Google Drive tersimpan di browser.');
+      setDriveStatus('setting tersimpan');
+    }
+
+    function initTokenClient(clientId) {
+      if (!window.google || !window.google.accounts || !window.google.accounts.oauth2) {
+        throw new Error('Google Identity script belum siap. Reload halaman lalu coba lagi.');
+      }
+
+      if (driveState.tokenClient && driveState.clientId === clientId) {
+        return;
+      }
+
+      driveState.clientId = clientId;
+      driveState.tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: DRIVE_SCOPE,
+        callback: (tokenResponse) => {
+          if (tokenResponse && tokenResponse.access_token) {
+            driveState.accessToken = tokenResponse.access_token;
+            setDriveStatus('terkoneksi ke Google Drive');
+            appendDriveLog('Token Google Drive berhasil didapat.');
+            if (driveState.pendingResolver) {
+              driveState.pendingResolver(tokenResponse.access_token);
+            }
+          } else {
+            const msg = tokenResponse?.error || 'Gagal ambil token Google';
+            setDriveStatus(msg, true);
+            appendDriveLog(msg, true);
+            if (driveState.pendingRejecter) {
+              driveState.pendingRejecter(new Error(msg));
+            }
+          }
+
+          driveState.pendingResolver = null;
+          driveState.pendingRejecter = null;
+        }
+      });
+    }
+
+    function requestDriveToken(prompt = '') {
+      return new Promise((resolve, reject) => {
+        driveState.pendingResolver = resolve;
+        driveState.pendingRejecter = reject;
+        driveState.tokenClient.requestAccessToken({ prompt });
+      });
+    }
+
+    async function connectGoogleDrive() {
+      try {
+        const { clientId } = getDriveSettings();
+        if (!clientId) {
+          alert('Isi Google OAuth Client ID dulu.');
+          return;
+        }
+
+        initTokenClient(clientId);
+        setDriveStatus('meminta izin Google...');
+        await requestDriveToken('consent');
+      } catch (error) {
+        setDriveStatus(error.message || 'Gagal konek Google Drive', true);
+        appendDriveLog(error.message || 'Gagal konek Google Drive', true);
+      }
+    }
+
+    async function ensureDriveToken() {
+      const { clientId } = getDriveSettings();
+      if (!clientId) {
+        throw new Error('Google OAuth Client ID belum diisi.');
+      }
+
+      initTokenClient(clientId);
+
+      if (driveState.accessToken) {
+        return driveState.accessToken;
+      }
+
+      return requestDriveToken('consent');
+    }
+
+    async function uploadFileToDrive(file, accessToken, folderId) {
+      const metadata = { name: file.name };
+      if (folderId) {
+        metadata.parents = [folderId];
+      }
+
+      const initRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,webViewLink', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json; charset=UTF-8',
+          'X-Upload-Content-Type': file.type || 'application/octet-stream',
+          'X-Upload-Content-Length': String(file.size)
+        },
+        body: JSON.stringify(metadata)
+      });
+
+      if (!initRes.ok) {
+        const body = await initRes.text();
+        throw new Error(`Init upload gagal (${initRes.status}): ${body.slice(0, 200)}`);
+      }
+
+      const sessionUrl = initRes.headers.get('Location');
+      if (!sessionUrl) {
+        throw new Error('Session upload URL tidak ditemukan.');
+      }
+
+      const uploadRes = await fetch(sessionUrl, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+          'Content-Range': `bytes 0-${file.size - 1}/${file.size}`
+        },
+        body: file
+      });
+
+      if (!(uploadRes.status === 200 || uploadRes.status === 201)) {
+        const body = await uploadRes.text();
+        throw new Error(`Upload gagal (${uploadRes.status}): ${body.slice(0, 200)}`);
+      }
+
+      return uploadRes.json();
+    }
+
+    async function uploadSelectedFilesToDrive() {
+      const input = document.getElementById('driveFilesInput');
+      const files = Array.from(input.files || []);
+      const { folderId } = getDriveSettings();
+
+      if (!files.length) {
+        alert('Pilih file dulu untuk diupload ke Drive.');
+        return;
+      }
+
+      try {
+        const token = await ensureDriveToken();
+        setDriveStatus('upload berjalan...');
+
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          appendDriveLog(`Upload ${i + 1}/${files.length}: ${file.name}`);
+
+          const result = await uploadFileToDrive(file, token, folderId);
+          const link = result.webViewLink ? ` | ${result.webViewLink}` : '';
+          appendDriveLog(`Sukses: ${result.name || file.name}${link}`);
+        }
+
+        setDriveStatus('upload selesai');
+      } catch (error) {
+        setDriveStatus(error.message || 'Upload ke Drive gagal', true);
+        appendDriveLog(error.message || 'Upload ke Drive gagal', true);
+      }
+    }
+
+    window.addEventListener('load', () => {
+      initDriveSettings();
+    });
+  </script>
+</body>
+</html>
